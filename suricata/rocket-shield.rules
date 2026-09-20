@@ -1,0 +1,51 @@
+# ROCKET Shield — Suricata signatures (IDS/IPS mode)
+# Load via suricata.yaml: rule-files: [ rocket-shield.rules ]
+# Run in IPS mode (nfqueue/af-packet with drop) to auto-mitigate on match.
+
+# --- Slowloris: many connections with incomplete headers, long-lived ---
+alert http any any -> $HOME_NET any (msg:"ROCKET-SHIELD Slowloris-style incomplete request"; \
+    flow:to_server,established; http.method; content:"GET"; \
+    flowbits:set,slow_conn; flowbits:noalert; \
+    detection_filter:track by_src, count 50, seconds 30; \
+    classtype:attempted-dos; sid:9000001; rev:1;)
+
+# --- HTTP flood: high request rate to a single URI from one source ---
+alert http any any -> $HOME_NET any (msg:"ROCKET-SHIELD HTTP flood single URI"; \
+    flow:to_server,established; http.uri; \
+    detection_filter:track by_src, count 200, seconds 10; \
+    classtype:attempted-dos; sid:9000002; rev:1;)
+
+# --- Known stress-tool user-agents ---
+alert http any any -> $HOME_NET any (msg:"ROCKET-SHIELD known DDoS tool user-agent"; \
+    flow:to_server,established; http.user_agent; \
+    pcre:"/^(LOIC|HOIC|Slowloris|Goldeneye|hulk|zmap)/i"; \
+    classtype:attempted-dos; sid:9000003; rev:1;)
+
+# --- DNS amplification reflected response ---
+alert udp $EXTERNAL_NET 53 -> $HOME_NET any (msg:"ROCKET-SHIELD DNS amplification reflection"; \
+    dsize:>512; \
+    detection_filter:track by_dst, count 100, seconds 1; \
+    classtype:attempted-dos; sid:9000004; rev:1;)
+
+# --- NTP monlist amplification ---
+alert udp $EXTERNAL_NET 123 -> $HOME_NET any (msg:"ROCKET-SHIELD NTP amplification reflection"; \
+    dsize:>440; \
+    detection_filter:track by_dst, count 50, seconds 1; \
+    classtype:attempted-dos; sid:9000005; rev:1;)
+
+# --- Memcached amplification (huge amplification factor, watch closely) ---
+alert udp $EXTERNAL_NET 11211 -> $HOME_NET any (msg:"ROCKET-SHIELD Memcached amplification reflection"; \
+    dsize:>1400; \
+    classtype:attempted-dos; sid:9000006; rev:1;)
+
+# --- SSH brute force ---
+alert tcp any any -> $HOME_NET 22 (msg:"ROCKET-SHIELD SSH brute force"; \
+    flow:to_server; \
+    detection_filter:track by_src, count 10, seconds 60; \
+    classtype:attempted-recon; sid:9000007; rev:1;)
+
+# --- Low-rate SYN retry pattern (evades simple pps thresholds) ---
+alert tcp any any -> $HOME_NET any (msg:"ROCKET-SHIELD low-rate SYN retry pattern"; \
+    flags:S; \
+    detection_filter:track by_src, count 30, seconds 60; \
+    classtype:attempted-dos; sid:9000008; rev:1;)
