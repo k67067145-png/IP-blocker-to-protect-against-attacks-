@@ -1,0 +1,17 @@
+[Unit]
+Description=ROCKET Shield DDoS Mitigation Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/nft -f /opt/rocket-shield/nftables/ddos_baseline.nft
+ExecStart=/usr/bin/python3 /opt/rocket-shield/agent/agent.py
+Restart=always
+RestartSec=3
+User=root
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_BPF
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
