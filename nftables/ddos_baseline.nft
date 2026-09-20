@@ -1,0 +1,102 @@
+#!/usr/sbin/nft -f
+#
+# ROCKET Shield — nftables baseline ruleset
+#
+# This is the L4 safety net that runs even when XDP is unavailable
+# (e.g. NIC driver without XDP support, or as defense-in-depth behind
+# the XDP layer). Handles both volumetric patterns (via rate limiting)
+# and low-and-slow patterns (via connection tracking limits).
+#
+# Apply:  sudo nft -f ddos_baseline.nft
+# Persist: sudo nft list ruleset > /etc/nftables.conf  (then enable nftables.service)
+
+table inet rocket_shield {
+
+    # Dynamic set populated by the agent (dynamic_blocklist.py) for IPs
+    # flagged by L7 behavioral detection (slow POST, header-drip, etc).
+    # Auto-expires — timeout is set per-element when the agent inserts it.
+    set dynamic_blocklist {
+        type ipv4_addr
+        flags dynamic, timeout
+        timeout 10m
+        size 500000
+    }
+
+    set dynamic_blocklist_v6 {
+        type ipv6_addr
+        flags dynamic, timeout
+        timeout 10m
+        size 500000
+    }
+
+    # Per-source connection counters for slow/low-rate abuse detection
+    set conn_rate_v4 {
+        type ipv4_addr
+        flags dynamic, timeout
+        timeout 60s
+        size 500000
+    }
+
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        # --- fast path: drop known-bad sources first ---
+        ip saddr @dynamic_blocklist drop
+        ip6 saddr @dynamic_blocklist_v6 drop
+
+        # loopback / established always allowed
+        iif "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+
+        # --- ICMP: rate-limited, never fully blocked (breaks PMTUD otherwise) ---
+        ip protocol icmp icmp type echo-request limit rate 50/second burst 20 packets accept
+        ip protocol icmp icmp type echo-request drop
+        ip6 nexthdr icmpv6 limit rate 50/second burst 20 packets accept
+
+        # --- SYN flood mitigation (belt-and-braces alongside XDP) ---
+        tcp flags syn tcp option maxseg size 1-500 drop  # abnormal MSS = scanning/flood tooling
+        tcp flags & (fin|syn|rst|ack) == syn ct state new \
+            limit rate over 1000/second burst 200 packets \
+            add @dynamic_blocklist { ip saddr timeout 5m } drop
+        tcp flags & (fin|syn|rst|ack) == syn ct state new \
+            limit rate 5000/second burst 500 packets accept
+        tcp flags & (fin|syn|rst|ack) == syn drop
+
+        # --- UDP flood: per-source rate cap, catches low-rate abuse too ---
+        udp dport != { 53, 123 } ct state new \
+            limit rate over 200/second burst 50 packets \
+            add @dynamic_blocklist { ip saddr timeout 5m } drop
+        udp ct state new limit rate 2000/second accept
+        udp ct state new drop
+
+        # --- Amplification source ports: drop unsolicited large replies ---
+        udp sport { 53, 123, 11211, 1900, 19 } ct state new counter drop
+
+        # --- Low-and-slow: cap simultaneous new connections per source IP ---
+        # (catches slow HTTP attacks that stay under the pps thresholds above)
+        tcp dport { 80, 443 } ct state new \
+            meter conn_rate_meter { ip saddr timeout 60s limit rate over 30/minute } \
+            add @dynamic_blocklist { ip saddr timeout 10m } drop
+
+        # --- SSH brute force ---
+        tcp dport 22 ct state new \
+            meter ssh_meter { ip saddr timeout 60s limit rate over 10/minute } \
+            add @dynamic_blocklist { ip saddr timeout 30m } drop
+
+        # allow legitimate app ports through after the above filters
+        tcp dport { 80, 443 } ct state new limit rate 10000/second accept
+        tcp dport 22 accept
+
+        # explicit app ports (adjust to your services)
+        tcp dport { 8080, 8443 } ct state new limit rate 5000/second accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        # edge/scrubbing-node forwarding path (only used when node mode = edge
+        # and a protection_binding is active for the forwarded prefix)
+        ip saddr @dynamic_blocklist drop
+        ct state established,related accept
+    }
+}
