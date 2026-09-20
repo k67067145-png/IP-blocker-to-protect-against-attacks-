@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+*.o
+/etc/rocket-shield/agent.json
+*.crt
+*.key
+*.pem
+.DS_Store
